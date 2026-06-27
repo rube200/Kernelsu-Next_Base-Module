@@ -26,13 +26,14 @@ check_css_file() {
 }
 
 check_file() {
-  case $1 in
-    *.css) check_css_file "$1" ;;
-    *.html) check_html_file "$1" ;;
-    *.js) check_js_file "$1" ;;
-    *.json) check_json_file "$1" ;;
-    *.md | *.prop | *.sh) check_text_file "$1" ;;
-    *) fail "Unexpected file type: $1" ;;
+  local f=${1#./}
+  case $f in
+    *.css) check_css_file "$f" ;;
+    *.html) check_html_file "$f" ;;
+    *.js) check_js_file "$f" ;;
+    *.json) check_json_file "$f" ;;
+    *.md | *.prop | *.sh) check_text_file "$f" ;;
+    *) fail "Unexpected file type: $f" ;;
   esac
 }
 
@@ -109,6 +110,40 @@ validate_changelog() {
   fi
 }
 
+validate_changelog_bullets() {
+  local file=CHANGELOG.md in_section=0 prev='' line item first
+  bullet_key() {
+    printf '%s' "$1" | tr -d '`'
+  }
+  while IFS= read -r line; do
+    case "$line" in
+      "## ["*)
+        in_section=1
+        prev=
+        ;;
+      "- "*)
+        if [ "$in_section" -eq 0 ]; then
+          continue
+        fi
+        item=${line#- }
+        if [ -n "$prev" ]; then
+          first=$(printf '%s\n%s' "$(bullet_key "$prev")" "$(bullet_key "$item")" | LC_ALL=C sort | head -1)
+          [ "$first" = "$(bullet_key "$prev")" ] \
+            || fail "$file bullets not alphabetical (expected '$item' before '$prev')"
+        fi
+        prev=$item
+        ;;
+      *)
+        if [ -z "$line" ]; then
+          continue
+        fi
+        in_section=0
+        prev=
+        ;;
+    esac
+  done <"$file"
+}
+
 validate_cross_refs() {
   local mp_vc mp_version uj_vc uj_version
   uj_vc=$(jq -er '.versionCode' update.json)
@@ -127,10 +162,11 @@ validate_cross_refs() {
 }
 
 validate_files() {
-  local f sc_files=()
+  local f base sc_files=()
   while IFS= read -r -d '' f; do
-    check_file "$f"
-    [[ "$f" == *.sh ]] && sc_files+=("$f")
+    base=${f#./}
+    check_file "$base"
+    [[ "$base" == *.sh ]] && sc_files+=("$base")
   done < <(discover_text_files)
 
   if [ ${#sc_files[@]} -eq 0 ]; then
@@ -204,9 +240,15 @@ validate_release() {
 }
 
 validate_required_files() {
-  [ -f CHANGELOG.md ] || fail "Missing CHANGELOG.md"
-  [ -f module.prop ] || fail "Missing module.prop"
-  [ -f update.json ] || fail "Missing update.json"
+  local f
+  for f in \
+    CHANGELOG.md \
+    LICENSE \
+    module.prop \
+    update.json
+  do
+    [ -f "$f" ] || fail "Missing $f"
+  done
 }
 
 validate_update_json() {
@@ -244,6 +286,7 @@ validate_required_files
 validate_module_prop
 validate_update_json
 validate_changelog
+validate_changelog_bullets
 validate_cross_refs
 validate_files
 validate_module_scripts
