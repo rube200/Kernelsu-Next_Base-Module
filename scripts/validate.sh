@@ -17,11 +17,18 @@ placeholder() {
 
 warn() { echo "Warning: $*" >&2; }
 
+repo_to_module_id() {
+  printf '%s' "$1" \
+    | sed -E 's/([a-z0-9])([A-Z])/\1-\2/g; s/([A-Z]+)([A-Z][a-z])/\1-\2/g' \
+    | tr '[:upper:]' '[:lower:]' \
+    | tr '_' '-'
+}
+
 check_css_file() {
   local f=$1
   check_text_file "$f"
   if grep -qiE '(@import[[:space:]]+url|url)[[:space:]]*\([[:space:]]*["'\'' ]*(https?:)?//' "$f"; then
-    fail "$f: external resources are not allowed; use local files or inline styles"
+    fail "$f: external resources are not allowed"
   fi
 }
 
@@ -41,7 +48,7 @@ check_html_file() {
   local f=$1 dir ref resolved line
   check_text_file "$f"
   if grep -qiE '<(link[^>]*stylesheet[^>]*href|script[^>]+src)=[[:space:]]*["'\'' ]*(https?:)?//' "$f"; then
-    fail "$f: external stylesheets and scripts are not allowed; use local files, a <style> block, or inline <script>"
+    fail "$f: external stylesheets and scripts are not allowed"
   fi
   dir=$(dirname "$f")
   while IFS= read -r line; do
@@ -59,7 +66,7 @@ check_js_file() {
   local f=$1
   check_text_file "$f"
   if grep -qiE '(import[[:space:]]+.*from[[:space:]]*|import[[:space:]]*\([[:space:]]*)["'\'' ]*(https?:)?//' "$f"; then
-    fail "$f: external imports are not allowed; use local modules only"
+    fail "$f: external imports are not allowed"
   fi
 }
 
@@ -80,9 +87,14 @@ check_text_file() {
   local last
   last=$(tail -c1 "$f" 2>/dev/null || true)
   [ -z "$last" ] || [ "$last" = $'\n' ] || fail "$f: Missing final newline"
-  if [[ "$f" != *.md ]] && grep -qE '[[:space:]]$' "$f"; then
-    fail "$f: Trailing whitespace"
-  fi
+  case $f in
+    *.md) ;;
+    *)
+      if grep -qE '[[:space:]]$' "$f"; then
+        fail "$f: Trailing whitespace"
+      fi
+      ;;
+  esac
 }
 
 discover_text_files() {
@@ -101,7 +113,7 @@ validate_changelog() {
   local line
   while IFS= read -r line; do
     [[ "$line" =~ ^##\ \[(Unreleased|v[0-9A-Za-z._-]+)\]$ ]] \
-      || fail "Invalid CHANGELOG section: $line (expected ## [Unreleased] or ## [vX.Y.Z])"
+      || fail "Invalid CHANGELOG section: $line"
   done < <(grep -E '^## \[' CHANGELOG.md 2>/dev/null || true)
 
   if [ -n "${RELEASE_VERSION:-}" ]; then
@@ -122,9 +134,7 @@ validate_changelog_bullets() {
         prev=
         ;;
       "- "*)
-        if [ "$in_section" -eq 0 ]; then
-          continue
-        fi
+        [ "$in_section" -eq 1 ] || continue
         item=${line#- }
         if [ -n "$prev" ]; then
           first=$(printf '%s\n%s' "$(bullet_key "$prev")" "$(bullet_key "$item")" | LC_ALL=C sort | head -1)
@@ -166,7 +176,9 @@ validate_files() {
   while IFS= read -r -d '' f; do
     base=${f#./}
     check_file "$base"
-    [[ "$base" == *.sh ]] && sc_files+=("$base")
+    if [[ "$base" == *.sh ]]; then
+      sc_files+=("$base")
+    fi
   done < <(discover_text_files)
 
   if [ ${#sc_files[@]} -eq 0 ]; then
@@ -177,7 +189,7 @@ validate_files() {
 }
 
 validate_module_prop() {
-  local k count id repo_lower uj vc
+  local k count id id_lower expected uj vc
   for k in author description id name version versionCode; do
     count=$(grep -c "^${k}=" module.prop 2>/dev/null || true)
     [ "${count:-0}" -le 1 ] || fail "Duplicate $k in module.prop"
@@ -188,14 +200,19 @@ validate_module_prop() {
   if placeholder "$id"; then
     if [ -n "${REPO_NAME:-}" ]; then
       [[ "$REPO_NAME" =~ ^[a-zA-Z][a-zA-Z0-9._-]+$ ]] \
-        || fail "Repo name '$REPO_NAME' is invalid for id=INJECTED (must match ^[a-zA-Z][a-zA-Z0-9._-]+$)"
-      repo_lower=$(printf '%s' "$REPO_NAME" | tr '[:upper:]' '[:lower:]')
-      if [ "$REPO_NAME" != "$repo_lower" ]; then
-        warn "Repo name '$REPO_NAME' contains uppercase; lowercase module ids are conventional (set id= in module.prop to override)"
-      fi
+        || fail "Repo name '$REPO_NAME' is invalid for id=INJECTED"
+      id=$(repo_to_module_id "$REPO_NAME")
     fi
-  else
+  elif [ -n "${REPO_NAME:-}" ]; then
+    expected=$(repo_to_module_id "$REPO_NAME")
+    [ "$id" = "$expected" ] \
+      || fail "module id '$id' must be kebab-case of repo '$REPO_NAME' (expected '$expected')"
+  fi
+  if ! placeholder "$id"; then
     [[ "$id" =~ ^[a-zA-Z][a-zA-Z0-9._-]+$ ]] || fail "Invalid id '$id'"
+    id_lower=$(printf '%s' "$id" | tr '[:upper:]' '[:lower:]')
+    [ "$id" = "$id_lower" ] \
+      || warn "module id '$id' contains uppercase; lowercase module ids are conventional"
   fi
 
   vc=$(get versionCode)
@@ -214,13 +231,26 @@ validate_module_prop() {
   fi
 }
 
+KSU_MODULE_SCRIPTS=(
+  action.sh
+  boot-completed.sh
+  late-load.sh
+  post-fs-data.sh
+  post-mount.sh
+  service.sh
+  uninstall.sh
+)
+
 validate_module_scripts() {
+  local f
   if [ -f customize.sh ] && ! grep -q 'SKIPUNZIP' customize.sh; then
     warn "customize.sh: consider setting SKIPUNZIP (see KernelSU docs)"
   fi
-  if [ -f service.sh ] && ! grep -q 'MODDIR' service.sh; then
-    warn "service.sh: consider using MODDIR=\${0%/*} for paths"
-  fi
+  for f in "${KSU_MODULE_SCRIPTS[@]}"; do
+    [ -f "$f" ] || continue
+    grep -q 'MODDIR=' "$f" \
+      || warn "$f: KernelSU recommends MODDIR=\${0%/*}"
+  done
 }
 
 validate_release() {
@@ -260,10 +290,7 @@ validate_update_json() {
   done
 
   uj_vc=$(jq -er '.versionCode | if type == "number" and (floor == .) then . else error("versionCode must be an integer") end' update.json)
-  if [ "$uj_vc" -lt 0 ]; then
-    fail "update.json versionCode must be >= 0"
-  fi
-
+  [ "$uj_vc" -ge 0 ] || fail "update.json versionCode must be >= 0"
   if [ "$uj_vc" -eq 0 ]; then
     return 0
   fi
@@ -277,9 +304,8 @@ validate_update_json() {
 }
 
 validate_webroot() {
-  if [ -d webroot ] && [ -n "$(find webroot -mindepth 1 -print -quit 2>/dev/null)" ]; then
-    [ -f webroot/index.html ] || fail "webroot/ is non-empty but missing webroot/index.html"
-  fi
+  [ -d webroot ] || return 0
+  [ -f webroot/index.html ] || fail "webroot/ requires webroot/index.html"
 }
 
 validate_required_files
