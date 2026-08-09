@@ -45,21 +45,26 @@ check_file() {
 }
 
 check_html_file() {
-  local f=$1 dir ref resolved line
+  local f=$1 dir tag href resolved
   check_text_file "$f"
-  if grep -qiE '<(link[^>]*stylesheet[^>]*href|script[^>]+src)=[[:space:]]*["'\'' ]*(https?:)?//' "$f"; then
-    fail "$f: external stylesheets and scripts are not allowed"
-  fi
   dir=$(dirname "$f")
-  while IFS= read -r line; do
-    [[ "$line" =~ (href|src)=[[:space:]]*[\"\']([^\"\']+)[\"\'] ]] || continue
-    ref="${BASH_REMATCH[2]}"
-    [[ "$ref" =~ ^(https?:)?// ]] && continue
-    [[ "$ref" =~ ^(data:|#|javascript:) ]] && continue
-    ref="${ref#./}"
-    resolved="$dir/$ref"
-    [ -f "$resolved" ] || fail "$f: referenced file not found: $ref"
-  done < <(grep -ioE '<(link[^>]*stylesheet[^>]*href|script[^>]+src)=[^>]+>' "$f" 2>/dev/null || true)
+  while IFS= read -r tag; do
+    if [[ "$tag" == \<link* ]] \
+      && ! [[ "$tag" =~ rel=[[:space:]]*[\"\'][^\"\']*(stylesheet|font)[^\"\']*[\"\'] ]] \
+      && ! [[ "$tag" =~ as=[[:space:]]*[\"\']font[\"\'] ]]; then
+      continue
+    fi
+    [[ "$tag" =~ (href|src|data)=[[:space:]]*[\"\']([^\"\']+)[\"\'] ]] || continue
+    href="${BASH_REMATCH[2]}"
+    if [[ "$href" =~ ^(https?:)?// ]]; then
+      fail "$f: external stylesheets, scripts, fonts, and embeds are not allowed"
+    fi
+    if [[ "$href" =~ ^(data:|#|javascript:) ]]; then
+      continue
+    fi
+    resolved="$dir/${href#./}"
+    [ -f "$resolved" ] || fail "$f: referenced file not found: $href"
+  done < <(grep -ioE '<link[^>]*>|<script[^>]*>|<iframe[^>]*>|<embed[^>]*>|<object[^>]*>' "$f" 2>/dev/null || true)
 }
 
 check_js_file() {
