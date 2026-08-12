@@ -256,6 +256,12 @@ validate_module_scripts() {
     grep -q 'MODDIR=' "$f" \
       || warn "$f: KernelSU recommends MODDIR=\${0%/*}"
   done
+
+  if [ -d webroot ]; then
+    [ -f scripts/webui.sh ] || fail "Missing scripts/webui.sh (required for webroot/)"
+    grep -q 'scripts/webui.sh' webroot/index.html \
+      || fail "webroot must invoke scripts/webui.sh"
+  fi
 }
 
 validate_release() {
